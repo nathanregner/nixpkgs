@@ -208,7 +208,7 @@ let format' = format; in let
 
   format = if format' == "qcow2-compressed" then "qcow2" else format';
 
-  compress = optionalString (format' == "qcow2-compressed") "-c";
+  compress = optionalString (format' == "qcow2-compressed") "-c -o compression_type=zstd ";
 
   filename = "nixos." + {
     qcow2 = "qcow2";
