@@ -35,18 +35,7 @@ maven.buildMavenPackage rec {
     sha256 = "sha256-93WmyIYmJAyuU1kmZlv1HKIv7KNquOe8vkWUvHpgTFU=";
   };
 
-  manualMvnArtifacts = [
-    "org.apache.apache.resources:apache-jar-resource-bundle:1.5"
-    "org.apache.maven.surefire:surefire-junit-platform:3.2.5:jar"
-    "org.apache.maven:apache-maven:3.9.8:tar.gz:bin"
-    "org.apache.maven:maven-slf4j-provider:3.9.8:jar:sources"
-    "org.graalvm.buildtools:graalvm-reachability-metadata:0.10.2:zip:repository"
-    "org.graalvm.buildtools:native-maven-plugin:0.10.2"
-  ];
-
-  mvnHash = "sha256-kBQQWmvAkxB8/Tvcp5VR/OC6mFwPh8A8XXdAIg7TYuQ=";
-
-  buildOffline = true;
+  mvnHash = "sha256-Xc955a927wgbkgea9TgYP0ct3wwsZ5q3YOklZQBilY0=";
 
   nativeBuildInputs = [
     graalvmCEPackages.graalvm-ce
@@ -54,22 +43,21 @@ maven.buildMavenPackage rec {
     makeWrapper
   ] ++ lib.optionals stdenv.isDarwin [ darwin.apple_sdk.frameworks.Foundation ];
 
+  mvnDepsParameters = mvnParameters;
   mvnParameters = lib.concatStringsSep " " [
     "-Dmaven.buildNumber.skip=true" # skip build number generation; requires a git repository
     "-Drat.skip=true" # skip license checks; they require manaul approval and should have already been run upstream
     "-Dspotless.skip=true" # skip formatting checks
 
+    # skip tests that fail in the sandbox
     "-pl"
-    "!integration-tests" # skip tests requiring network acccess
-
-    "-Dtest=!org.mvndaemon.mvnd.client.OsUtilsTest,!org.mvndaemon.mvnd.cache.impl.CacheFactoryTest.timestampCache" # not happy in the sandbox
+    "!integration-tests"
+    "-Dtest=!org.mvndaemon.mvnd.client.OsUtilsTest,!org.mvndaemon.mvnd.cache.impl.CacheFactoryTest.timestampCache"
     "-Dsurefire.failIfNoSpecifiedTests=false"
 
     "-Pnative"
-    # Propagate linker args required by the darwin build
-    # > Pass the whole environment to the native-image build process by
-    # > generating a -E option for every environment variable.
-    # source: `buildGraalvmNativeImage`
+    # propagate linker args required by the darwin build
+    # see `buildGraalvmNativeImage`
     ''-Dgraalvm-native-static-opt="-H:-CheckToolchain $(export -p | sed -n 's/^declare -x \([^=]\+\)=.*$/ -E\1/p' | tr -d \\n)"''
   ];
 
