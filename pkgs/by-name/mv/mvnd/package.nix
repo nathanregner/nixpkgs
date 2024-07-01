@@ -40,9 +40,10 @@ maven.buildMavenPackage rec {
     "org.apache.maven:maven-slf4j-provider:3.9.8:jar:sources"
     "org.graalvm.buildtools:graalvm-reachability-metadata:0.10.2:zip:repository"
     "org.graalvm.buildtools:native-maven-plugin:0.10.2"
+    "org.apache.maven.surefire:surefire-junit-platform:jar:3.2.5"
   ];
 
-  mvnHash = "sha256-CuXo+WxMzWSFu0O0c5Zo4eDXWmFa9DJrf1zfMpCSsiU=";
+  mvnHash = "";
 
   buildOffline = true;
 
@@ -53,13 +54,15 @@ maven.buildMavenPackage rec {
 
   mvnParameters = lib.concatStringsSep " " [
     # skip tests; they require network acccess
-    "-DskipTests=true"
+    # "-DskipTests=true"
     "-pl"
     "!integration-tests"
 
     "-Dmaven.buildNumber.skip=true" # skip build number generation; requires a git repository
     "-Drat.skip=true" # skip license checks; they require manaul approval and should have already been run upstream
     "-Dspotless.skip=true" # skip formatting checks
+
+    "-Dtest=\\!CronTabTest*"
 
     "-Pnative"
     # Propagate linker args required by the darwin build
