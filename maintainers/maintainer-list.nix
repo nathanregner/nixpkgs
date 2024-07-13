@@ -14964,6 +14964,12 @@
     email = "nathaniel.brough@gmail.com";
     name = "Nathaniel Brough";
   };
+  nathanregner = {
+    email = "nathanregner@gmail.com";
+    github = "nathanregner";
+    githubId = 9659564;
+    name = "Nathan Regner";
+  };
   nathanruiz = {
     email = "nathanruiz@protonmail.com";
     github = "nathanruiz";
