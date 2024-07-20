@@ -302,7 +302,7 @@ let
     name = "nix-store-image";
     inherit pkgs config lib;
     additionalPaths = [ regInfo ];
-    format = "qcow2";
+    format = if cfg.compressNixStoreImage then "qcow2-compressed" else "qcow2";
     onlyNixStore = true;
     label = nixStoreFilesystemLabel;
     partitionTableType = "none";
@@ -794,6 +794,15 @@ in
           {option}`virtualisation.mountHostNixStore`.
         '';
       };
+
+    virtualisation.compressNixStoreImage = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        When {option}`virtualisation.useNixStoreImage` is
+        set, compress the Nix store image.
+      '';
+    };
 
     virtualisation.mountHostNixStore =
       mkOption {

@@ -252,6 +252,9 @@ in
       # /nix/store from the host's /nix/store, preventing this problem.
       useNixStoreImage = true;
 
+      # Compress the store image to save on bandwidth/binary cache usage.
+      compressNixStoreImage = true;
+
       # Obviously the /nix/store needs to be writable on the guest in order for it
       # to perform builds.
       writableStore = true;
