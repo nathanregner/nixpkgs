@@ -55,7 +55,7 @@ let
         mvn dependency:sources -DincludeGroupIds="$group" -DincludeArtifactIds="$artifact" -Dmaven.repo.local=$out/.m2
       done
     '' + lib.optionalString (!buildOffline) ''
-      mvn package -Dmaven.repo.local=$out/.m2 ${mvnSkipTests} ${mvnParameters}
+      mvn package -Dmaven.repo.local=$out/.m2 -s ${./settings.xml} ${mvnSkipTests} ${mvnParameters}
     '' + ''
       runHook postBuild
     '';

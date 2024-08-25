@@ -1,0 +1,9 @@
+    <settings>
+      <mirrors>
+        <mirror>
+          <id>nexus</id>
+          <url>https://nexus.nregner.net/repository/maven-public</url>
+          <mirrorOf>*</mirrorOf>
+        </mirror>
+      </mirrors>
+    </settings>
