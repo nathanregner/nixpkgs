@@ -31,19 +31,17 @@ maven.buildMavenPackage rec {
     owner = "apache";
     repo = "maven-mvnd";
     rev = version;
-    fetchSubmodules = false;
     sha256 = "sha256-c1jD7m4cOdPWQEoaUMcNap2zvvX7H9VaWQv8JSgAnRU=";
   };
 
   mvnJdk = graalvmCEPackages.graalvm-ce;
-
   mvnHash = "sha256-Bx0XSnpHNxNX07uVPc18py9qbnG5b3b7J4vs44ty034=";
 
   nativeBuildInputs = [
     graalvmCEPackages.graalvm-ce
     installShellFiles
     makeWrapper
-  ] ++ lib.optionals stdenv.isDarwin [ darwin.apple_sdk.frameworks.Foundation ];
+  ] ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.apple_sdk.frameworks.Foundation ];
 
   mvnDepsParameters = mvnParameters;
   mvnParameters = lib.concatStringsSep " " [
