@@ -3,17 +3,15 @@
   fetchFromGitHub,
   graalvmCEPackages,
   installShellFiles,
-  jdk,
   lib,
   makeWrapper,
   maven,
   mvnd,
   nix-update-script,
+  runCommand,
   stdenv,
   testers,
 }:
-
-assert jdk != null;
 
 let
   platformMap = {
@@ -69,7 +67,6 @@ maven.buildMavenPackage rec {
 
     cp -r dist/target/maven-mvnd-${version}-${platformMap.${stdenv.system}}/* $out/mvnd-home
     makeWrapper $out/mvnd-home/bin/mvnd $out/bin/mvnd \
-      --set-default JAVA_HOME "${jdk}" \
       --set-default MVND_HOME $out/mvnd-home
 
     installShellCompletion --cmd mvnd \
@@ -79,16 +76,30 @@ maven.buildMavenPackage rec {
   '';
 
   passthru = {
-    tests.version = testers.testVersion { package = mvnd; };
+    tests.version = testers.testVersion {
+      # `java` or `JAVA_HOME` is required to run mvnd
+      # presumably the user already has a JDK installed if they're using maven; don't pull in an unnecessary runtime dependency
+      package =
+        runCommand "mvnd"
+          {
+            inherit version;
+            nativeBuildInputs = [ makeWrapper ];
+          }
+          ''
+            mkdir -p $out/bin
+            makeWrapper ${mvnd}/bin/mvnd $out/bin/mvnd \
+              --suffix PATH : ${lib.makeBinPath [ mvnJdk ]}
+          '';
+    };
     updateScript = nix-update-script { };
   };
 
-  meta = with lib; {
+  meta = {
     description = "The Apache Maven Daemon";
     homepage = "https://maven.apache.org/";
-    license = licenses.asl20;
-    platforms = platforms.unix;
-    maintainers = with maintainers; [ nathanregner ];
+    license = lib.licenses.asl20;
+    platforms = lib.platforms.unix;
+    maintainers = with lib.maintainers; [ nathanregner ];
     mainProgram = "mvnd";
   };
 }
