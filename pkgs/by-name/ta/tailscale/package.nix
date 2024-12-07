@@ -1,5 +1,6 @@
 { lib
 , stdenv
+, nix-update-script
 , buildGo123Module
 , fetchFromGitHub
 , fetchpatch
@@ -77,9 +78,14 @@ buildGo123Module {
       --zsh <($out/bin/tailscale completion zsh)
   '';
 
-  passthru.tests = {
-    inherit (nixosTests) headscale;
-    inherit tailscale-nginx-auth;
+  passthru = {
+    tests = {
+      inherit (nixosTests) headscale;
+      inherit tailscale-nginx-auth;
+    };
+    updateScript = nix-update-script {
+      extraArgs = [ "--version-regex" "^v([0-9.]+)$" ]; # skip prereleases
+    };
   };
 
   meta = with lib; {
