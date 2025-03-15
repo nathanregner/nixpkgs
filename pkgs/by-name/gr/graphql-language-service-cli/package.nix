@@ -12,18 +12,18 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "graphql-language-service-cli";
-  version = "3.4.2";
+  version = "3.5.0";
 
   src = fetchFromGitHub {
     owner = "graphql";
     repo = "graphiql";
     tag = "graphql-language-service-cli@${finalAttrs.version}";
-    hash = "sha256-2TiJsEc1kzUJiLnqtUhmR/ouqx2OOdvHPXU4z8vn2Es=";
+    hash = "sha256-NJTggaMNMjOP5oN+gHxFTwEdNipPNzTFfA6f975HDgM=";
   };
 
   yarnOfflineCache = fetchYarnDeps {
     yarnLock = "${finalAttrs.src}/yarn.lock";
-    hash = "sha256-ALE7CQdrfhjdmHJ6GNgcXNaNxu85m/4eivfkZVyw/cI=";
+    hash = "sha256-ae6KP2sFgw8/8YaTJSPscBlVQ5/bzbvHRZygcMgFAlU=";
   };
 
   nativeBuildInputs = [
