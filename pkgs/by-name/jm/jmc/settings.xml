@@ -1,0 +1,9 @@
+<settings>
+ <mirrors>
+  <mirror>
+   <id>nexus</id>
+   <url>http://sagittarius:8082/repository/maven-public</url>
+   <mirrorOf>*</mirrorOf>
+  </mirror>
+ </mirrors>
+</settings>
