@@ -14,11 +14,24 @@
 
 let
   platformMap = {
-    aarch64-darwin = "darwin-aarch64";
-    aarch64-linux = "linux-aarch64";
-    x86_64-darwin = "darwin-amd64";
-    x86_64-linux = "linux-amd64";
+    aarch64-darwin = {
+      os = "darwin";
+      arch = "aarch64";
+    };
+    aarch64-linux = {
+      os = "linux";
+      arch = "aarch64";
+    };
+    x86_64-darwin = {
+      os = "darwin";
+      arch = "arm64";
+    };
+    x86_64-linux = {
+      os = "linux";
+      arch = "arm64";
+    };
   };
+  inherit (platformMap.${stdenv.hostPlatform.system}) os arch;
 in
 
 maven.buildMavenPackage rec {
@@ -30,10 +43,11 @@ maven.buildMavenPackage rec {
     rev = version;
     sha256 = "sha256-c1jD7m4cOdPWQEoaUMcNap2zvvX7H9VaWQv8JSgAnRU=";
   };
+  patches = [ ./patches/0001-hack-remove-gmavenplus-plugin.patch ];
 
   # need graalvm at build-time for the `native-image` tool
   mvnJdk = graalvmPackages.graalvm-ce;
-  mvnHash = "sha256-Bx0XSnpHNxNX07uVPc18py9qbnG5b3b7J4vs44ty034=";
+  mvnHash = "sha256-RvFFssd9PdU/k/PL+L+xJ/cy46vT+x6Hj212auj3Ipw=";
 
   nativeBuildInputs = [
     graalvmPackages.graalvm-ce
@@ -46,6 +60,11 @@ maven.buildMavenPackage rec {
     "-Dmaven.buildNumber.skip=true" # skip build number generation; requires a git repository
     "-Drat.skip=true" # skip license checks; they require manaul approval and should have already been run upstream
     "-Dspotless.skip=true" # skip formatting checks
+
+    # normally the `gmavenplus` plugin would set these; do it ourselves so we
+    # don't have to worry about it not supporting older versions of the JDK
+    "-Dos.detected.name=${os}"
+    "-Dos.detected.arch=${arch}"
 
     # skip tests that fail in the sandbox
     "-pl"
@@ -65,7 +84,7 @@ maven.buildMavenPackage rec {
     mkdir -p $out/bin
     mkdir -p $out/mvnd-home
 
-    cp -r dist/target/maven-mvnd-${version}-${platformMap.${stdenv.system}}/* $out/mvnd-home
+    cp -r dist/target/maven-mvnd-${version}-${os}-${arch}/* $out/mvnd-home
     makeWrapper $out/mvnd-home/bin/mvnd $out/bin/mvnd \
       --set-default MVND_HOME $out/mvnd-home
 
@@ -91,8 +110,9 @@ maven.buildMavenPackage rec {
             }
             ''
               mkdir -p $out/bin
-              makeWrapper ${mvnd}/bin/mvnd $out/bin/mvnd \
+              makeWrapper${mvnd}/bin/mvnd $out/bin/mvnd \
                 --suffix PATH : ${lib.makeBinPath [ mvnJdk ]}
+
             '';
       };
     });

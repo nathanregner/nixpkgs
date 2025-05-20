@@ -1,0 +1,59 @@
+From 473ddd2c3716388d24b41d9f984057a816c2a803 Mon Sep 17 00:00:00 2001
+From: Nathan Regner <nathanregner@gmail.com>
+Date: Fri, 16 May 2025 22:58:51 -0600
+Subject: [PATCH] hack: remove gmavenplus-plugin until it works with Java 24+
+
+> [ERROR] Failed to execute goal org.codehaus.gmavenplus:gmavenplus-plugin:3.0.2:execute (set-platform-properties) on project mvnd: Error occurred while calling a method on a Groovy class from classpath.: InvocationTargetException: BUG! exception in phase 'semantic analysis' in source unit 'Script1.groovy' Unsupported class file major version 68 -> [Help 1]
+---
+ pom.xml | 35 -----------------------------------
+ 1 file changed, 35 deletions(-)
+
+diff --git a/pom.xml b/pom.xml
+index f7ae9d3c..f7b47ff8 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -545,41 +545,6 @@
+           </execution>
+         </executions>
+       </plugin>
+-      <plugin>
+-        <groupId>org.codehaus.gmavenplus</groupId>
+-        <artifactId>gmavenplus-plugin</artifactId>
+-        <executions>
+-          <execution>
+-            <id>set-platform-properties</id>
+-            <goals>
+-              <goal>execute</goal>
+-            </goals>
+-            <phase>generate-sources</phase>
+-            <configuration>
+-              <scripts>
+-                <script>// Naming conventions coined by GraalVM
+-                        // https://github.com/graalvm/graalvm-ce-builds/releases/
+-                        String osName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+-                        if (osName.startsWith('windows')) {
+-                            project.properties['os.detected.name'] = 'windows'
+-                        } else if (osName.startsWith('linux')) {
+-                            project.properties['os.detected.name'] = 'linux'
+-                        } else if (osName.startsWith('osx') || osName.startsWith('mac os x')) {
+-                            project.properties['os.detected.name'] = 'darwin'
+-                        } else {
+-                            project.properties['os.detected.name'] = osName
+-                        }
+-                        String osArch = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
+-                        if (osArch.equals('amd64') || osArch.equals('x86_64')) {
+-                            project.properties['os.detected.arch'] = 'amd64'
+-                        } else {
+-                            project.properties['os.detected.arch'] = osArch
+-                        }</script>
+-              </scripts>
+-            </configuration>
+-          </execution>
+-        </executions>
+-      </plugin>
+     </plugins>
+   </build>
+ 
+-- 
+2.49.0
+
