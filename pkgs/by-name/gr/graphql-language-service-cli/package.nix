@@ -1,40 +1,39 @@
 {
   lib,
   fetchFromGitHub,
-  fetchYarnDeps,
   makeWrapper,
   nodejs,
   stdenv,
-  yarnBuildHook,
-  yarnConfigHook,
   versionCheckHook,
+  yarn-berry_4,
 }:
-
-stdenv.mkDerivation (finalAttrs: {
+let
+  manifest = lib.importJSON ./manifest.json;
+in
+stdenv.mkDerivation (finalAttrs: rec {
   pname = "graphql-language-service-cli";
-  version = "3.5.0";
+  inherit (manifest.src) version;
 
   src = fetchFromGitHub {
     owner = "graphql";
     repo = "graphiql";
-    tag = "graphql-language-service-cli@${finalAttrs.version}";
-    hash = "sha256-NJTggaMNMjOP5oN+gHxFTwEdNipPNzTFfA6f975HDgM=";
+    inherit (manifest.src) rev hash;
   };
 
   patches = [
     ./patches/0001-repurpose-vscode-graphql-build-script.patch
   ];
 
-  yarnOfflineCache = fetchYarnDeps {
-    yarnLock = "${finalAttrs.src}/yarn.lock";
-    hash = "sha256-ae6KP2sFgw8/8YaTJSPscBlVQ5/bzbvHRZygcMgFAlU=";
+  inherit (manifest.yarn) missingHashes;
+  offlineCache = yarn-berry_4.fetchYarnBerryDeps {
+    inherit src missingHashes;
+    inherit (manifest.yarn) sha256;
   };
 
   nativeBuildInputs = [
-    yarnConfigHook
-    yarnBuildHook
-    nodejs
     makeWrapper
+    yarn-berry_4
+    yarn-berry_4.yarnBerryConfigHook
   ];
 
   installPhase = ''
@@ -62,7 +61,7 @@ stdenv.mkDerivation (finalAttrs: {
   versionCheckProgram = "${placeholder "out"}/bin/${finalAttrs.meta.mainProgram}";
 
   passthru = {
-    updateScript = ./updater.sh;
+    updateScript = ./update.py;
   };
 
   meta = {
