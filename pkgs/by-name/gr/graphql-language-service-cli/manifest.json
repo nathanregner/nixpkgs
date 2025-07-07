@@ -1,0 +1,11 @@
+{
+ "version": "3.5.0-unstable-2025-06-01",
+ "src": {
+  "rev": "c753d964f2f6d7178a15d0a2b69989de7dc1598c",
+  "hash": "sha256-1hrTROXvJ8qPdGFUJyCD/8lxfvXgtJATLcEime69pAw="
+ },
+ "yarn": {
+  "hash": "asdf",
+  "missingHashes": {}
+ }
+}

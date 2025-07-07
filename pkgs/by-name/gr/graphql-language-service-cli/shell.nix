@@ -8,6 +8,8 @@ pkgs.mkShellNoCC {
       ps.requests
       ps.requests-cache
     ]))
+
+    nix-prefetch-github
     yarn-berry_4.yarn-berry-fetcher
   ];
 }

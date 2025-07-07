@@ -1,6 +1,7 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -i python -p "python3.withPackages (ps: with ps; [ ps.requests ps.requests-cache ])"
+#!nix-shell -i python3 shell.nix
 
+import json
 import os
 import re
 import subprocess
@@ -81,51 +82,79 @@ class Commit:
         return response
 
 
-def fetch_yarn_hashes(tag: Commit):
+def fetch_yarn_hashes(commit: Commit):
     print("prefetch-yarn-deps", file=sys.stderr)
-    with tempfile.NamedTemporaryFile() as tmp:
-        response = tag.get_file("yarn.lock")
-        tmp.write(response.content)
+    with (
+        tempfile.NamedTemporaryFile() as yarn_lock,
+        tempfile.NamedTemporaryFile() as missing_hashes,
+    ):
+        response = commit.get_file("yarn.lock")
+        yarn_lock.write(response.content)
 
-        with open("missing-hashes.json", "w") as f:
-            subprocess.run(
-                ["yarn-berry-fetcher", "missing-hashes", tmp.name],
-                stdout=f,
-                check=True,
-            )
+        subprocess.run(
+            ["yarn-berry-fetcher", "missing-hashes", yarn_lock.name],
+            stdout=missing_hashes,
+            check=True,
+        )
 
-        with open("yarn-hash", "w") as f:
-            subprocess.run(
-                [
-                    "yarn-berry-fetcher",
-                    "prefetch",
-                    tmp.name,
-                    "missing-hashes.json",
-                ],
-                stdout=f,
-                check=True,
-            )
+        yarn_hash = subprocess.run(
+            [
+                "yarn-berry-fetcher",
+                "prefetch",
+                yarn_lock.name,
+                "missing-hashes.json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        return (
+            yarn_hash.stdout,
+            missing_hashes.read().decode(),
+        )
 
 
-def get_version(tag: Commit):
-    package_json = tag.get_file(
+def fetch_version(commit: Commit):
+    package_json = commit.get_file(
         "packages/graphql-language-service-cli/package.json"
     ).json()
-    return f"{package_json['version']}-unstable-{tag.date.date().isoformat()}"
+    return f"{package_json['version']}-unstable-{commit.date.date().isoformat()}"
+
+
+def fetch_source_hash(commit: Commit):
+    res = subprocess.run(
+        ["nix-prefetch-github", "graphql", "graphiql", "--rev", commit.sha],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(res.stdout)["hash"]
 
 
 def main():
     tags = group_latest_tags(fetch_tags())
     commit = Commit.fetch_latest(tags)
-    version = get_version(commit)
+    version = fetch_version(commit)
 
     prev_version = os.getenv("UPDATE_NIX_OLD_VERSION")
     if prev_version == version:
         print("No update available", file=sys.stderr)
         exit()
 
-    # fetch_yarn_hashes(tag)
-    print()
+    print(f"fetching yarn hashes for {commit.sha}")
+    yarn_hash, missing_hashes = fetch_yarn_hashes(commit)
+
+    print(f"fetching source hash for {commit.sha}")
+    src_hash = fetch_source_hash(commit)
+
+    with open("manifest.json", "w") as f:
+        manifest = {
+            "version": version,
+            "src": {"rev": commit.sha, "hash": src_hash},
+            "yarn": {"hash": yarn_hash, "missingHashes": missing_hashes},
+        }
+        f.write(json.dumps(manifest, indent=True))
 
 
 if __name__ == "__main__":

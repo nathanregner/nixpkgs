@@ -12,7 +12,7 @@ let
 in
 stdenv.mkDerivation (finalAttrs: rec {
   pname = "graphql-language-service-cli";
-  inherit (manifest.src) version;
+  inherit (manifest) version;
 
   src = fetchFromGitHub {
     owner = "graphql";
