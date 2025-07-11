@@ -4,6 +4,7 @@
   fetchFromGitHub,
   testers,
   krr,
+  nix-update-script,
 }:
 
 python3.pkgs.buildPythonPackage rec {
@@ -50,6 +51,8 @@ python3.pkgs.buildPythonPackage rec {
   pythonImportsCheck = [
     "robusta_krr"
   ];
+
+  passthru.updateScript = nix-update-script { };
 
   passthru.tests.version = testers.testVersion {
     package = krr;
