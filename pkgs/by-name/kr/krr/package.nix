@@ -9,39 +9,63 @@
 
 python3.pkgs.buildPythonPackage rec {
   pname = "krr";
-  version = "1.7.1";
+  version = "1.24.0";
   pyproject = true;
 
   src = fetchFromGitHub {
     owner = "robusta-dev";
     repo = "krr";
     tag = "v${version}";
-    hash = "sha256-Bc1Ql3z/UmOXE2RJYC5/sE4a3MFdE06I3HwKY+SdSlk=";
+    hash = "sha256-2Kj94Co+4JV/ikLBUFqV4BdwFJSzvsbchf6As9U7LpQ=";
   };
 
-  postPatch = ''
-    substituteInPlace robusta_krr/__init__.py \
-      --replace-warn '1.7.0-dev' '${version}'
+  # postPatch = ''
+  #   substituteInPlace robusta_krr/__init__.py \
+  #     --replace-warn '1.7.0-dev' '${version}'
+  #
+  #   substituteInPlace pyproject.toml \
+  #     --replace-warn '1.7.0-dev' '${version}' \
+  #     --replace-fail 'aiostream = "^0.4.5"' 'aiostream = "*"' \
+  #     --replace-fail 'kubernetes = "^26.1.0"' 'kubernetes = "*"' \
+  #     --replace-fail 'pydantic = "1.10.7"' 'pydantic = "*"' \
+  #     --replace-fail 'typer = { extras = ["all"], version = "^0.7.0" }' 'typer = { extras = ["all"], version = "*" }'
+  # '';
 
-    substituteInPlace pyproject.toml \
-      --replace-warn '1.7.0-dev' '${version}' \
-      --replace-fail 'aiostream = "^0.4.5"' 'aiostream = "*"' \
-      --replace-fail 'kubernetes = "^26.1.0"' 'kubernetes = "*"' \
-      --replace-fail 'pydantic = "1.10.7"' 'pydantic = "*"' \
-      --replace-fail 'typer = { extras = ["all"], version = "^0.7.0" }' 'typer = { extras = ["all"], version = "*" }'
-  '';
+  pythonRelaxDeps = [
+    "idna"
+    "kubernetes"
+    "numpy"
+    "pandas"
+    "prometheus-api-client"
+    "pydantic"
+    "pyyaml"
+    "requests"
+    "setuptools"
+    "typer"
+    "typing-extensions"
+    "urllib3"
+  ];
 
   propagatedBuildInputs = with python3.pkgs; [
-    aiostream
+    poetry-core
+
     alive-progress
+    idna
     kubernetes
     numpy
-    poetry-core
+    pandas
     prometheus-api-client
     prometrix
-    pydantic_1
+    pydantic
+    pyyaml
+    requests
+    setuptools
     slack-sdk
+    tenacity
     typer
+    typing-extensions
+    urllib3
+    zipp
   ];
 
   nativeCheckInputs = with python3.pkgs; [
