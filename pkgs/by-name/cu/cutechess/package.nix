@@ -1,5 +1,6 @@
 {
   stdenv,
+  libsForQt5,
   fetchFromGitHub,
   cmake,
   pkg-config,
@@ -25,6 +26,9 @@ stdenv.mkDerivation (finalAttrs: {
   ];
   buildInputs = [
     qt5.qtbase
+  ]
+  ++ lib.optionals stdenv.hostPlatform.isDarwin [
+    libsForQt5.qtsvg
   ];
 
   postInstall = ''
@@ -39,7 +43,7 @@ stdenv.mkDerivation (finalAttrs: {
     homepage = "https://cutechess.com/";
     license = lib.licenses.gpl3Plus;
     maintainers = with lib.maintainers; [ iedame ];
-    platforms = with lib.platforms; (linux ++ windows);
+    platforms = with lib.platforms; (linux ++ windows ++ darwin);
     mainProgram = "cutechess";
   };
 })
