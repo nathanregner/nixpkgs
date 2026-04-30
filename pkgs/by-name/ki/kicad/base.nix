@@ -89,6 +89,10 @@ stdenv.mkDerivation (finalAttrs: {
     ./writable.patch
     # https://gitlab.com/kicad/code/kicad/-/issues/15687
     ./runtime_stock_data_path.patch
+  ]
+  ++ optionals stdenv.hostPlatform.isDarwin [
+    # Fix PYTHON_FRAMEWORK being used unconditionally even when empty
+    ./darwin_python_framework.patch
   ];
 
   # tagged releases don't have "unknown"

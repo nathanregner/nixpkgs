@@ -1,0 +1,18 @@
+diff --git a/kicad/CMakeLists.txt b/kicad/CMakeLists.txt
+--- a/kicad/CMakeLists.txt
++++ b/kicad/CMakeLists.txt
+@@ -230,10 +230,12 @@ if( APPLE )
+         set( PYTHON_FRAMEWORK_HELPER "0" )
+     endif()
+
+-    set_target_properties( kicad PROPERTIES BUILD_RPATH ${PYTHON_FRAMEWORK} )
++    if( PYTHON_FRAMEWORK )
++        set_target_properties( kicad PROPERTIES BUILD_RPATH ${PYTHON_FRAMEWORK} )
++        set_target_properties( kicad-cli PROPERTIES BUILD_RPATH ${PYTHON_FRAMEWORK} )
++    endif()
+     set_target_properties( kicad PROPERTIES INSTALL_RPATH
+             "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
+-    set_target_properties( kicad-cli PROPERTIES BUILD_RPATH ${PYTHON_FRAMEWORK} )
+     set_target_properties( kicad-cli PROPERTIES INSTALL_RPATH
+             "@executable_path/../Frameworks;@executable_path/../Frameworks/Python.framework" )
+
