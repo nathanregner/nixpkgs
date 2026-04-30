@@ -128,6 +128,11 @@ stdenv.mkDerivation (finalAttrs: {
   ]
   ++ optionals (stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64) [
     (cmakeFeature "CMAKE_CTEST_ARGUMENTS" "--exclude-regex;'qa_spice|qa_cli'")
+  ]
+  ++ optionals (stdenv.hostPlatform.isDarwin && withNgspice) [
+    # kicad's Findngspice.cmake looks for libngspice.so.0 on UNIX,
+    # but macOS uses .dylib extension
+    (cmakeFeature "NGSPICE_LIB_NAME" "libngspice.0.dylib")
   ];
 
   cmakeBuildType = if debug then "Debug" else "Release";
