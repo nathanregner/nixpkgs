@@ -134,6 +134,8 @@ stdenv.mkDerivation (finalAttrs: {
     # kicad uses PYTHON_FRAMEWORK unconditionally in set_target_properties,
     # causing cmake errors when it's empty (Nix doesn't use Python.framework)
     (cmakeFeature "PYTHON_FRAMEWORK" "${python}/lib")
+    # Nix handles library dependencies, don't bundle them into the .app
+    (cmakeBool "KICAD_APPLE_MAKE_RELOCATEABLE_BUNDLE" false)
   ];
 
   cmakeBuildType = if debug then "Debug" else "Release";
