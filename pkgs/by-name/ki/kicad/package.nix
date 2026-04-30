@@ -13,6 +13,7 @@
   dconf,
   gtk3,
   wxwidgets_3_2,
+  wxwidgets_3_3,
   librsvg,
   cups,
   gsettings-desktop-schemas,
@@ -134,7 +135,10 @@ let
     else
       versionsImport.${baseName}.libVersion.version;
 
-  wxGTK = wxwidgets_3_2;
+  # kicad uses SetStateImages API which requires wxWidgets 3.3+ on non-macOS,
+  # but kicad expects macOS wxWidgets to have it backported. Since nixpkgs
+  # wxWidgets 3.2 doesn't have this backport, use 3.3 on Darwin.
+  wxGTK = if stdenv.hostPlatform.isDarwin then wxwidgets_3_3 else wxwidgets_3_2;
   python = python3;
   wxPython = python.pkgs.wxpython;
   addonPath = "addon.zip";
