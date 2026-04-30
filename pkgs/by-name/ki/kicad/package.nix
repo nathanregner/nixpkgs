@@ -218,11 +218,16 @@ stdenv.mkDerivation rec {
   # https://gitlab.com/kicad/code/kicad/-/issues/14792
   template_dir = symlinkJoin {
     name = "KiCad_template_dir";
-    paths = with passthru.libraries; [
-      "${templates}/template"
-      "${footprints}/template"
-      "${symbols}/template"
-    ];
+    paths =
+      let
+        prefix = if stdenv.hostPlatform.isLinux then "/share/kicad" else "";
+      in
+      with passthru.libraries;
+      [
+        "${templates}${prefix}/template"
+        "${footprints}${prefix}/template"
+        "${symbols}${prefix}/template"
+      ];
   };
   # We are emulating wrapGAppsHook3, along with other variables to the wrapper
   makeWrapperArgs =
