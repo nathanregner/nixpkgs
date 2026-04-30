@@ -89,10 +89,6 @@ stdenv.mkDerivation (finalAttrs: {
     ./writable.patch
     # https://gitlab.com/kicad/code/kicad/-/issues/15687
     ./runtime_stock_data_path.patch
-  ]
-  ++ optionals stdenv.hostPlatform.isDarwin [
-    # Fix PYTHON_FRAMEWORK being used unconditionally even when empty
-    ./darwin_python_framework.patch
   ];
 
   # tagged releases don't have "unknown"
@@ -133,6 +129,11 @@ stdenv.mkDerivation (finalAttrs: {
     # kicad's Findngspice.cmake looks for libngspice.so.0 on UNIX,
     # but macOS uses .dylib extension
     (cmakeFeature "NGSPICE_LIB_NAME" "libngspice.0.dylib")
+  ]
+  ++ optionals stdenv.hostPlatform.isDarwin [
+    # kicad uses PYTHON_FRAMEWORK unconditionally in set_target_properties,
+    # causing cmake errors when it's empty (Nix doesn't use Python.framework)
+    (cmakeFeature "PYTHON_FRAMEWORK" "${python}/lib")
   ];
 
   cmakeBuildType = if debug then "Debug" else "Release";
