@@ -215,6 +215,6 @@ stdenv.mkDerivation (finalAttrs: {
     homepage = "https://www.kicad.org/";
     license = lib.licenses.gpl3Plus;
     platforms = lib.platforms.all;
-    broken = stdenv.hostPlatform.isDarwin;
+    # broken = stdenv.hostPlatform.isDarwin;
   };
 })

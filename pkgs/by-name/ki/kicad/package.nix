@@ -25,7 +25,7 @@
   stable ? true,
   compressStep ? true,
   testing ? false,
-  withNgspice ? !stdenv.hostPlatform.isDarwin,
+  withNgspice ? true,
   libngspice,
   withScripting ? true,
   python3,
@@ -215,9 +215,9 @@ stdenv.mkDerivation rec {
   template_dir = symlinkJoin {
     name = "KiCad_template_dir";
     paths = with passthru.libraries; [
-      "${templates}/share/kicad/template"
-      "${footprints}/share/kicad/template"
-      "${symbols}/share/kicad/template"
+      "${templates}/template"
+      "${footprints}/template"
+      "${symbols}/template"
     ];
   };
   # We are emulating wrapGAppsHook3, along with other variables to the wrapper
@@ -337,7 +337,7 @@ stdenv.mkDerivation rec {
       ryand56
     ];
     platforms = lib.platforms.all;
-    broken = stdenv.hostPlatform.isDarwin;
+    # broken = stdenv.hostPlatform.isDarwin;
     mainProgram = "kicad";
   };
 }
