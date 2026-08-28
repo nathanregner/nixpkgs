@@ -1,0 +1,1267 @@
+From fb3082bfa1a195089625d785b6d63a7f832182f8 Mon Sep 17 00:00:00 2001
+From: mehulparmariitr <11155969+mehulparmariitr@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 21:06:22 +0530
+Subject: [PATCH] fix(tui): reuse terminal size across draws
+
+---
+ codex-rs/tui/src/app.rs                       |  49 +++++---
+ codex-rs/tui/src/app/event_dispatch.rs        |   7 +-
+ codex-rs/tui/src/app/input.rs                 |   3 +-
+ codex-rs/tui/src/app/resize_reflow.rs         |  38 ++++--
+ codex-rs/tui/src/app/tests.rs                 |   3 +-
+ codex-rs/tui/src/app_backtrack.rs             |  41 ++++--
+ codex-rs/tui/src/custom_terminal.rs           |  47 ++++++-
+ codex-rs/tui/src/cwd_prompt.rs                |   5 +-
+ .../src/external_agent_config_migration.rs    |  11 +-
+ .../external_agent_config_migration_source.rs |  11 +-
+ codex-rs/tui/src/model_migration.rs           |  11 +-
+ .../tui/src/onboarding/onboarding_screen.rs   |  13 +-
+ codex-rs/tui/src/pager_overlay.rs             |  34 +++--
+ codex-rs/tui/src/resume_picker.rs             |  41 +++---
+ codex-rs/tui/src/startup_hooks_review.rs      |  19 +--
+ codex-rs/tui/src/transcript_reflow.rs         |  39 ++++++
+ codex-rs/tui/src/tui.rs                       | 118 ++++++++++++++----
+ codex-rs/tui/src/tui/event_stream.rs          |  14 ++-
+ codex-rs/tui/src/update_prompt.rs             |   5 +-
+ 19 files changed, 385 insertions(+), 124 deletions(-)
+
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index b201d8f02055..ed5789e8d24d 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -78,6 +78,7 @@ use crate::test_support::test_path_buf;
+ #[cfg(test)]
+ use crate::test_support::test_path_display;
+ use crate::token_usage::TokenUsage;
++use crate::transcript_reflow::SizeRecheck;
+ use crate::transcript_reflow::TranscriptReflowState;
+ use crate::tui;
+ use crate::tui::TuiEvent;
+@@ -174,6 +175,7 @@ use crossterm::event::KeyEventKind;
+ use crossterm::event::KeyModifiers;
+ use ratatui::backend::Backend;
+ use ratatui::layout::Rect;
++use ratatui::layout::Size;
+ use ratatui::style::Stylize;
+ use ratatui::text::Line;
+ use ratatui::widgets::Paragraph;
+@@ -1289,12 +1291,30 @@ See the Codex keymap documentation for supported actions and examples."
+         app_server: &mut AppServerSession,
+         event: TuiEvent,
+     ) -> Result<AppRunControl> {
+-        if matches!(event, TuiEvent::Draw | TuiEvent::Resize) {
+-            self.handle_draw_pre_render(tui)?;
++        let screen_size = match &event {
++            TuiEvent::Resize(size) => *size,
++            TuiEvent::Draw => match self.transcript_reflow.poll_size_recheck(Instant::now()) {
++                SizeRecheck::NotPending => tui.terminal.last_known_screen_size,
++                SizeRecheck::Pending(delay) => {
++                    tui.frame_requester().schedule_frame_in(delay);
++                    tui.terminal.last_known_screen_size
++                }
++                SizeRecheck::Due => tui.terminal.size()?,
++            },
++            TuiEvent::Resume => tui.terminal.size()?,
++            TuiEvent::Key(_) | TuiEvent::Paste(_) => tui.terminal.last_known_screen_size,
++        };
++        if matches!(
++            &event,
++            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_)
++        ) {
++            self.handle_draw_pre_render(tui, screen_size)?;
+         }
+ 
+         if self.overlay.is_some() {
+-            let _ = self.handle_backtrack_overlay_event(tui, event).await?;
++            let _ = self
++                .handle_backtrack_overlay_event(tui, event, screen_size)
++                .await?;
+         } else {
+             match event {
+                 TuiEvent::Key(key_event) => {
+@@ -1308,9 +1328,9 @@ See the Codex keymap documentation for supported actions and examples."
+                     let pasted = pasted.replace("\r", "\n");
+                     self.chat_widget.handle_paste(pasted);
+                 }
+-                TuiEvent::Draw | TuiEvent::Resize => {
++                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
+                     if self.backtrack_render_pending {
+-                        self.rebuild_transcript_after_backtrack(tui)?;
++                        self.rebuild_transcript_after_backtrack(tui, screen_size.width)?;
+                         self.backtrack_render_pending = false;
+                     }
+                     self.chat_widget.maybe_post_pending_notification(tui);
+@@ -1322,14 +1342,13 @@ See the Codex keymap documentation for supported actions and examples."
+                     }
+                     // Allow widgets to process any pending timers before rendering.
+                     self.chat_widget.pre_draw_tick();
+-                    let rendered_area = self.render_chat_widget_frame(tui)?;
++                    let rendered_area = self.render_chat_widget_frame(tui, screen_size)?;
+                     if self.chat_widget.ambient_pet_image_enabled() {
+-                        let terminal_size = tui.terminal.size()?;
+                         let ambient_pet_area = Rect::new(
+                             /*x*/ 0,
+                             /*y*/ 0,
+-                            terminal_size.width,
+-                            terminal_size.height,
++                            screen_size.width,
++                            screen_size.height,
+                         );
+                         if let Err(err) = tui.draw_ambient_pet_image(
+                             self.chat_widget
+@@ -1361,17 +1380,17 @@ See the Codex keymap documentation for supported actions and examples."
+     pub(super) fn show_shutdown_feedback(&mut self, tui: &mut tui::Tui) -> Result<()> {
+         self.disable_ambient_pet_before_shutdown(tui)?;
+         self.chat_widget.show_shutdown_in_progress();
+-        self.handle_draw_pre_render(tui)?;
++        let screen_size = tui.terminal.last_known_screen_size;
++        self.handle_draw_pre_render(tui, screen_size)?;
+         self.chat_widget.pre_draw_tick();
+-        self.render_chat_widget_frame(tui)?;
++        self.render_chat_widget_frame(tui, screen_size)?;
+         Ok(())
+     }
+ 
+-    fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui) -> Result<Rect> {
+-        let width = tui.terminal.size()?.width;
+-        self.with_chat_widget_frame(width, |desired_height, chat_widget| {
++    fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
++        self.with_chat_widget_frame(screen_size.width, |desired_height, chat_widget| {
+             let mut rendered_area = Rect::default();
+-            tui.draw_with_resize_reflow(desired_height, |frame| {
++            tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
+                 let area = frame.area();
+                 rendered_area = area;
+                 chat_widget.render(area, frame.buffer);
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 7fb1c0679896..1a350f52d7a5 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -415,13 +415,14 @@ impl App {
+             AppEvent::CodexOp(op) => {
+                 let is_user_turn = matches!(&op, AppCommand::UserTurn { .. });
+                 if is_user_turn {
+-                    self.handle_draw_pre_render(tui)?;
++                    let screen_size = tui.terminal.last_known_screen_size;
++                    self.handle_draw_pre_render(tui, screen_size)?;
+                     if self.transcript_reflow.has_pending_reflow() {
+                         self.transcript_reflow.schedule_immediate();
+-                        self.maybe_run_resize_reflow(tui)?;
++                        self.maybe_run_resize_reflow(tui, screen_size)?;
+                     }
+                     self.chat_widget.pre_draw_tick();
+-                    self.render_chat_widget_frame(tui)?;
++                    self.render_chat_widget_frame(tui, screen_size)?;
+                 }
+                 self.chat_widget.prepare_local_op_submission(&op);
+                 if let Err(err) = self.submit_active_thread_op(app_server, op).await {
+diff --git a/codex-rs/tui/src/app/input.rs b/codex-rs/tui/src/app/input.rs
+index dcd88dfb82b3..202eefbf41f0 100644
+--- a/codex-rs/tui/src/app/input.rs
++++ b/codex-rs/tui/src/app/input.rs
+@@ -79,7 +79,8 @@ impl App {
+         } else {
+             self.chat_widget.set_raw_output_mode(enabled);
+         }
+-        if let Err(err) = self.reflow_transcript_now(tui) {
++        let terminal_width = tui.terminal.last_known_screen_size.width;
++        if let Err(err) = self.reflow_transcript_now(tui, terminal_width) {
+             tracing::warn!(error = %err, "failed to reflow transcript after raw output mode toggle");
+             self.chat_widget
+                 .add_error_message(format!("Failed to redraw transcript: {err}"));
+diff --git a/codex-rs/tui/src/app/resize_reflow.rs b/codex-rs/tui/src/app/resize_reflow.rs
+index 7d00f7f5ff65..0e2def95b9e6 100644
+--- a/codex-rs/tui/src/app/resize_reflow.rs
++++ b/codex-rs/tui/src/app/resize_reflow.rs
+@@ -253,7 +253,8 @@ impl App {
+     pub(super) fn maybe_finish_stream_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
+         if self.transcript_reflow.take_stream_finish_reflow_needed() {
+             self.schedule_immediate_resize_reflow(tui);
+-            self.maybe_run_resize_reflow(tui)?;
++            let screen_size = tui.terminal.last_known_screen_size;
++            self.maybe_run_resize_reflow(tui, screen_size)?;
+         } else if self.transcript_reflow.pending_is_due(Instant::now()) {
+             tui.frame_requester().schedule_frame();
+         }
+@@ -285,7 +286,8 @@ impl App {
+         }
+ 
+         self.schedule_immediate_resize_reflow(tui);
+-        self.maybe_run_resize_reflow(tui)?;
++        let screen_size = tui.terminal.last_known_screen_size;
++        self.maybe_run_resize_reflow(tui, screen_size)?;
+         if !self.transcript_reflow.has_pending_reflow() {
+             self.transcript_reflow.clear_stream_flags();
+         }
+@@ -342,8 +344,11 @@ impl App {
+         self.reset_history_emission_state();
+     }
+ 
+-    pub(super) fn handle_draw_pre_render(&mut self, tui: &mut tui::Tui) -> Result<()> {
+-        let size = tui.terminal.size()?;
++    pub(super) fn handle_draw_pre_render(
++        &mut self,
++        tui: &mut tui::Tui,
++        size: ratatui::layout::Size,
++    ) -> Result<()> {
+         let should_rebuild_transcript = self.handle_draw_size_change(
+             size,
+             tui.terminal.last_known_screen_size,
+@@ -355,7 +360,7 @@ impl App {
+             // rebuild from transcript cells.
+             tui.clear_pending_history_lines();
+         }
+-        self.maybe_run_resize_reflow(tui)?;
++        self.maybe_run_resize_reflow(tui, size)?;
+         Ok(())
+     }
+ 
+@@ -365,7 +370,11 @@ impl App {
+     /// surface. Callers must keep using `HistoryCell` source as the rebuild input; attempting to
+     /// reuse terminal-wrapped output here would preserve exactly the stale wrapping this feature is
+     /// meant to remove.
+-    pub(super) fn maybe_run_resize_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
++    pub(super) fn maybe_run_resize_reflow(
++        &mut self,
++        tui: &mut tui::Tui,
++        screen_size: ratatui::layout::Size,
++    ) -> Result<()> {
+         let Some(deadline) = self.transcript_reflow.pending_until() else {
+             return Ok(());
+         };
+@@ -390,7 +399,7 @@ impl App {
+         let reflow_ran_during_stream =
+             !self.transcript_cells.is_empty() && self.should_mark_reflow_as_stream_time();
+ 
+-        let width = self.reflow_transcript_now(tui)?;
++        let width = self.reflow_transcript_now(tui, screen_size.width)?;
+         self.transcript_reflow.mark_reflowed_width(width);
+ 
+         if reflow_ran_during_stream {
+@@ -399,14 +408,18 @@ impl App {
+         // Some terminals settle their final reported width after the repaint that handled the
+         // last resize event. Request one cheap follow-up draw so `handle_draw_pre_render` can
+         // sample that width and schedule a final reflow if needed.
++        self.transcript_reflow.schedule_size_recheck();
+         tui.frame_requester()
+             .schedule_frame_in(TRANSCRIPT_REFLOW_DEBOUNCE);
+ 
+         Ok(())
+     }
+ 
+-    pub(super) fn reflow_transcript_now(&mut self, tui: &mut tui::Tui) -> Result<u16> {
+-        let terminal_width = tui.terminal.size()?.width;
++    pub(super) fn reflow_transcript_now(
++        &mut self,
++        tui: &mut tui::Tui,
++        terminal_width: u16,
++    ) -> Result<u16> {
+         let width = self.chat_widget.history_wrap_width(terminal_width);
+         if self.transcript_cells.is_empty() {
+             // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
+@@ -438,8 +451,11 @@ impl App {
+     /// Unlike resize reflow, rollback must clear the terminal even when no cells remain. Otherwise
+     /// the cancelled user prompt stays visible in scrollback despite being removed from the source
+     /// transcript.
+-    pub(super) fn rebuild_transcript_after_backtrack(&mut self, tui: &mut tui::Tui) -> Result<()> {
+-        let terminal_width = tui.terminal.size()?.width;
++    pub(super) fn rebuild_transcript_after_backtrack(
++        &mut self,
++        tui: &mut tui::Tui,
++        terminal_width: u16,
++    ) -> Result<()> {
+         let width = self.chat_widget.history_wrap_width(terminal_width);
+         let reflowed_lines = if self.transcript_cells.is_empty() {
+             self.reset_history_emission_state();
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index 042b08e0c4e4..33d762fbdb69 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -5354,7 +5354,8 @@ async fn required_stream_reflow_during_capped_initial_replay_survives_transcript
+     assert!(app.initial_history_replay_buffer.is_none());
+     assert!(app.transcript_reflow.has_pending_reflow());
+ 
+-    app.maybe_run_resize_reflow(&mut tui)?;
++    let screen_size = tui.terminal.last_known_screen_size;
++    app.maybe_run_resize_reflow(&mut tui, screen_size)?;
+     assert!(app.transcript_reflow.has_pending_reflow());
+ 
+     app.close_transcript_overlay(&mut tui);
+diff --git a/codex-rs/tui/src/app_backtrack.rs b/codex-rs/tui/src/app_backtrack.rs
+index f4114a3f90b0..f56c0740afa8 100644
+--- a/codex-rs/tui/src/app_backtrack.rs
++++ b/codex-rs/tui/src/app_backtrack.rs
+@@ -47,6 +47,7 @@ use color_eyre::eyre::bail;
+ use crossterm::event::KeyCode;
+ use crossterm::event::KeyEvent;
+ use crossterm::event::KeyEventKind;
++use ratatui::layout::Size;
+ 
+ const NO_PREVIOUS_MESSAGE_TO_EDIT: &str = "No previous message to edit.";
+ pub(crate) const SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE: &str =
+@@ -89,6 +90,7 @@ impl App {
+         &mut self,
+         tui: &mut tui::Tui,
+         event: TuiEvent,
++        screen_size: Size,
+     ) -> Result<bool> {
+         if self.backtrack.overlay_preview_active {
+             match event {
+@@ -97,7 +99,7 @@ impl App {
+                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                     ..
+                 }) => {
+-                    self.overlay_step_backtrack(tui, event)?;
++                    self.overlay_step_backtrack(tui, event, screen_size)?;
+                     Ok(true)
+                 }
+                 TuiEvent::Key(KeyEvent {
+@@ -105,7 +107,7 @@ impl App {
+                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                     ..
+                 }) => {
+-                    self.overlay_step_backtrack(tui, event)?;
++                    self.overlay_step_backtrack(tui, event, screen_size)?;
+                     Ok(true)
+                 }
+                 TuiEvent::Key(KeyEvent {
+@@ -113,7 +115,7 @@ impl App {
+                     kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                     ..
+                 }) => {
+-                    self.overlay_step_backtrack_forward(tui, event)?;
++                    self.overlay_step_backtrack_forward(tui, event, screen_size)?;
+                     Ok(true)
+                 }
+                 TuiEvent::Key(KeyEvent {
+@@ -125,7 +127,7 @@ impl App {
+                     Ok(true)
+                 }
+                 _ => {
+-                    self.overlay_forward_event(tui, event)?;
++                    self.overlay_forward_event(tui, event, screen_size)?;
+                     Ok(true)
+                 }
+             }
+@@ -140,7 +142,7 @@ impl App {
+             Ok(true)
+         } else {
+             // Not in backtrack mode: forward events to the overlay widget.
+-            self.overlay_forward_event(tui, event)?;
++            self.overlay_forward_event(tui, event, screen_size)?;
+             Ok(true)
+         }
+     }
+@@ -340,13 +342,22 @@ impl App {
+     /// This logic lives here (instead of inside the overlay widget) because `ChatWidget` is the
+     /// source of truth for the active cell and its cache invalidation key, and because `App` owns
+     /// overlay lifecycle and frame scheduling for animations.
+-    fn overlay_forward_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+-        if matches!(&event, TuiEvent::Draw | TuiEvent::Resize)
++    fn overlay_forward_event(
++        &mut self,
++        tui: &mut tui::Tui,
++        event: TuiEvent,
++        screen_size: Size,
++    ) -> Result<()> {
++        let draw_screen_size = match &event {
++            TuiEvent::Resize(_) | TuiEvent::Draw | TuiEvent::Resume => Some(screen_size),
++            TuiEvent::Key(_) | TuiEvent::Paste(_) => None,
++        };
++        if let Some(draw_screen_size) = draw_screen_size
+             && let Some(Overlay::Transcript(t)) = &mut self.overlay
+         {
+             let active_key = self.chat_widget.active_cell_transcript_key();
+             let chat_widget = &self.chat_widget;
+-            tui.draw(u16::MAX, |frame| {
++            tui.draw_with_size(u16::MAX, draw_screen_size, |frame| {
+                 let width = frame.area().width.max(1);
+                 t.sync_live_tail(width, active_key, |w| {
+                     chat_widget.active_cell_transcript_hyperlink_lines(w)
+@@ -369,7 +380,7 @@ impl App {
+         }
+ 
+         if let Some(overlay) = &mut self.overlay {
+-            overlay.handle_event(tui, event)?;
++            overlay.handle_event(tui, event, screen_size)?;
+             if overlay.is_done() {
+                 self.close_transcript_overlay(tui);
+                 tui.frame_requester().schedule_frame();
+@@ -390,11 +401,16 @@ impl App {
+     }
+ 
+     /// Handle Esc in overlay backtrack preview: step selection if armed, else forward.
+-    fn overlay_step_backtrack(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
++    fn overlay_step_backtrack(
++        &mut self,
++        tui: &mut tui::Tui,
++        event: TuiEvent,
++        screen_size: Size,
++    ) -> Result<()> {
+         if self.backtrack.base_id.is_some() {
+             self.step_backtrack_and_highlight(tui);
+         } else {
+-            self.overlay_forward_event(tui, event)?;
++            self.overlay_forward_event(tui, event, screen_size)?;
+         }
+         Ok(())
+     }
+@@ -404,11 +420,12 @@ impl App {
+         &mut self,
+         tui: &mut tui::Tui,
+         event: TuiEvent,
++        screen_size: Size,
+     ) -> Result<()> {
+         if self.backtrack.base_id.is_some() {
+             self.step_forward_backtrack_and_highlight(tui);
+         } else {
+-            self.overlay_forward_event(tui, event)?;
++            self.overlay_forward_event(tui, event, screen_size)?;
+         }
+         Ok(())
+     }
+diff --git a/codex-rs/tui/src/custom_terminal.rs b/codex-rs/tui/src/custom_terminal.rs
+index 57f5049a5110..82ccc2d404d6 100644
+--- a/codex-rs/tui/src/custom_terminal.rs
++++ b/codex-rs/tui/src/custom_terminal.rs
+@@ -376,7 +376,16 @@ where
+     where
+         F: FnOnce(&mut Frame),
+     {
+-        self.try_draw(|frame| {
++        let screen_size = self.size()?;
++        self.draw_with_size(screen_size, render_callback)
++    }
++
++    /// Draws a single frame using a screen size already obtained by the caller.
++    pub fn draw_with_size<F>(&mut self, screen_size: Size, render_callback: F) -> io::Result<()>
++    where
++        F: FnOnce(&mut Frame),
++    {
++        self.try_draw_with_size(screen_size, |frame| {
+             render_callback(frame);
+             io::Result::Ok(())
+         })
+@@ -422,10 +431,18 @@ where
+         F: FnOnce(&mut Frame) -> Result<(), E>,
+         E: Into<io::Error>,
+     {
+-        // Autoresize - otherwise we get glitches if shrinking or potential desync between widgets
+-        // and the terminal (if growing), which may OOB.
+-        self.autoresize()?;
++        let screen_size = self.size()?;
++        self.try_draw_with_size(screen_size, render_callback)
++    }
+ 
++    fn try_draw_with_size<F, E>(&mut self, screen_size: Size, render_callback: F) -> io::Result<()>
++    where
++        F: FnOnce(&mut Frame) -> Result<(), E>,
++        E: Into<io::Error>,
++    {
++        if screen_size != self.last_known_screen_size {
++            self.resize(screen_size)?;
++        }
+         let mut frame = self.get_frame();
+ 
+         render_callback(&mut frame).map_err(Into::into)?;
+@@ -812,6 +829,7 @@ mod tests {
+         output: Vec<u8>,
+         size: Size,
+         cursor: Position,
++        size_call_count: std::cell::Cell<usize>,
+     }
+ 
+     impl CaptureBackend {
+@@ -820,6 +838,7 @@ mod tests {
+                 output: Vec::new(),
+                 size: Size { width, height },
+                 cursor: Position { x: 0, y: 0 },
++                size_call_count: std::cell::Cell::new(0),
+             }
+         }
+ 
+@@ -893,6 +912,8 @@ mod tests {
+         }
+ 
+         fn size(&self) -> io::Result<Size> {
++            self.size_call_count
++                .set(self.size_call_count.get().saturating_add(1));
+             Ok(self.size)
+         }
+ 
+@@ -908,6 +929,24 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn draw_with_size_does_not_query_backend_size() {
++        let mut terminal =
++            Terminal::with_options(CaptureBackend::new(/*width*/ 80, /*height*/ 24))
++                .expect("terminal");
++        let screen_size = Size {
++            width: 100,
++            height: 30,
++        };
++
++        terminal
++            .draw_with_size(screen_size, |_frame| {})
++            .expect("draw");
++
++        assert_eq!(terminal.backend().size_call_count.get(), 1);
++        assert_eq!(terminal.last_known_screen_size, screen_size);
++    }
++
+     #[test]
+     fn diff_buffers_does_not_emit_clear_to_end_for_full_width_row() {
+         let area = Rect::new(0, 0, 3, 2);
+diff --git a/codex-rs/tui/src/cwd_prompt.rs b/codex-rs/tui/src/cwd_prompt.rs
+index 1d89c8bfc01a..4597af878172 100644
+--- a/codex-rs/tui/src/cwd_prompt.rs
++++ b/codex-rs/tui/src/cwd_prompt.rs
+@@ -129,11 +129,12 @@ pub(crate) async fn run_cwd_selection_prompt(
+ 
+     while !screen.is_done() {
+         if let Some(event) = events.next().await {
++            let screen_size = tui.screen_size_for_event(&event)?;
+             match event {
+                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
+                 TuiEvent::Paste(_) => {}
+-                TuiEvent::Draw | TuiEvent::Resize => {
+-                    tui.draw(u16::MAX, |frame| {
++                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                    tui.draw_with_size(u16::MAX, screen_size, |frame| {
+                         frame.render_widget_ref(&screen, frame.area());
+                     })?;
+                 }
+diff --git a/codex-rs/tui/src/external_agent_config_migration.rs b/codex-rs/tui/src/external_agent_config_migration.rs
+index 2722f49f43f2..b486e858cb46 100644
+--- a/codex-rs/tui/src/external_agent_config_migration.rs
++++ b/codex-rs/tui/src/external_agent_config_migration.rs
+@@ -97,13 +97,16 @@ pub(crate) async fn run_external_agent_config_migration_prompt(
+ 
+     while !screen.is_done() {
+         if let Some(event) = events.next().await {
++            let screen_size = tui.screen_size_for_event(&event).ok();
+             match event {
+                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
+                 TuiEvent::Paste(_) => {}
+-                TuiEvent::Draw | TuiEvent::Resize => {
+-                    let _ = tui.draw(u16::MAX, |frame| {
+-                        frame.render_widget_ref(&screen, frame.area());
+-                    });
++                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                    if let Some(screen_size) = screen_size {
++                        let _ = tui.draw_with_size(u16::MAX, screen_size, |frame| {
++                            frame.render_widget_ref(&screen, frame.area());
++                        });
++                    }
+                 }
+             }
+         } else {
+diff --git a/codex-rs/tui/src/external_agent_config_migration_source.rs b/codex-rs/tui/src/external_agent_config_migration_source.rs
+index 463313ca6602..2f4fc21a00e5 100644
+--- a/codex-rs/tui/src/external_agent_config_migration_source.rs
++++ b/codex-rs/tui/src/external_agent_config_migration_source.rs
+@@ -58,13 +58,16 @@ pub(crate) async fn run_external_agent_config_source_prompt(
+ 
+     while !screen.is_done() {
+         if let Some(event) = events.next().await {
++            let screen_size = tui.screen_size_for_event(&event).ok();
+             match event {
+                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
+                 TuiEvent::Paste(_) => {}
+-                TuiEvent::Draw | TuiEvent::Resize => {
+-                    let _ = tui.draw(u16::MAX, |frame| {
+-                        frame.render_widget_ref(&screen, frame.area());
+-                    });
++                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                    if let Some(screen_size) = screen_size {
++                        let _ = tui.draw_with_size(u16::MAX, screen_size, |frame| {
++                            frame.render_widget_ref(&screen, frame.area());
++                        });
++                    }
+                 }
+             }
+         } else {
+diff --git a/codex-rs/tui/src/model_migration.rs b/codex-rs/tui/src/model_migration.rs
+index c307abb78ff9..1754c1dc639c 100644
+--- a/codex-rs/tui/src/model_migration.rs
++++ b/codex-rs/tui/src/model_migration.rs
+@@ -150,13 +150,16 @@ pub(crate) async fn run_model_migration_prompt(
+ 
+     while !screen.is_done() {
+         if let Some(event) = events.next().await {
++            let screen_size = alt.tui.screen_size_for_event(&event).ok();
+             match event {
+                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
+                 TuiEvent::Paste(_) => {}
+-                TuiEvent::Draw | TuiEvent::Resize => {
+-                    let _ = alt.tui.draw(u16::MAX, |frame| {
+-                        frame.render_widget_ref(&screen, frame.area());
+-                    });
++                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                    if let Some(screen_size) = screen_size {
++                        let _ = alt.tui.draw_with_size(u16::MAX, screen_size, |frame| {
++                            frame.render_widget_ref(&screen, frame.area());
++                        });
++                    }
+                 }
+             }
+         } else {
+diff --git a/codex-rs/tui/src/onboarding/onboarding_screen.rs b/codex-rs/tui/src/onboarding/onboarding_screen.rs
+index 0236d06894a1..ee2684aecde7 100644
+--- a/codex-rs/tui/src/onboarding/onboarding_screen.rs
++++ b/codex-rs/tui/src/onboarding/onboarding_screen.rs
+@@ -495,6 +495,7 @@ pub(crate) async fn run_onboarding_app(
+         tokio::select! {
+             event = tui_events.next() => {
+                 if let Some(event) = event {
++                    let screen_size = tui.screen_size_for_event(&event)?;
+                     match event {
+                         TuiEvent::Key(key_event) => {
+                             onboarding_screen.handle_key_event(key_event);
+@@ -509,7 +510,7 @@ pub(crate) async fn run_onboarding_app(
+                         TuiEvent::Paste(text) => {
+                             onboarding_screen.handle_paste(text);
+                         }
+-                        TuiEvent::Draw | TuiEvent::Resize => {
++                        TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
+                             if !did_full_clear_after_success
+                                 && onboarding_screen.steps.iter().any(|step| {
+                                     if let Step::Auth(w) = step {
+@@ -540,9 +541,13 @@ pub(crate) async fn run_onboarding_app(
+                                 let _ = tui.terminal.clear();
+                                 did_full_clear_after_success = true;
+                             }
+-                            let _ = tui.draw(u16::MAX, |frame| {
+-                                frame.render_widget_ref(&onboarding_screen, frame.area());
+-                            });
++                            let _ = tui.draw_with_size(
++                                u16::MAX,
++                                screen_size,
++                                |frame| {
++                                    frame.render_widget_ref(&onboarding_screen, frame.area());
++                                },
++                            );
+                         }
+                     }
+                 }
+diff --git a/codex-rs/tui/src/pager_overlay.rs b/codex-rs/tui/src/pager_overlay.rs
+index 23e470cb00b7..4964ca8472d5 100644
+--- a/codex-rs/tui/src/pager_overlay.rs
++++ b/codex-rs/tui/src/pager_overlay.rs
+@@ -39,6 +39,7 @@ use crossterm::event::KeyEvent;
+ use ratatui::buffer::Buffer;
+ use ratatui::buffer::Cell;
+ use ratatui::layout::Rect;
++use ratatui::layout::Size;
+ use ratatui::style::Style;
+ use ratatui::style::Stylize;
+ use ratatui::text::Line;
+@@ -76,10 +77,15 @@ impl Overlay {
+         Self::Static(StaticOverlay::with_renderables(renderables, title, keymap))
+     }
+ 
+-    pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
++    pub(crate) fn handle_event(
++        &mut self,
++        tui: &mut tui::Tui,
++        event: TuiEvent,
++        screen_size: Size,
++    ) -> Result<()> {
+         match self {
+-            Overlay::Transcript(o) => o.handle_event(tui, event),
+-            Overlay::Static(o) => o.handle_event(tui, event),
++            Overlay::Transcript(o) => o.handle_event(tui, event, screen_size),
++            Overlay::Static(o) => o.handle_event(tui, event, screen_size),
+         }
+     }
+ 
+@@ -789,7 +795,12 @@ impl TranscriptOverlay {
+ }
+ 
+ impl TranscriptOverlay {
+-    pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
++    pub(crate) fn handle_event(
++        &mut self,
++        tui: &mut tui::Tui,
++        event: TuiEvent,
++        screen_size: Size,
++    ) -> Result<()> {
+         match event {
+             TuiEvent::Key(key_event) => match key_event {
+                 e if self.view.keymap.close.is_pressed(e)
+@@ -800,8 +811,8 @@ impl TranscriptOverlay {
+                 }
+                 other => self.view.handle_key_event(tui, other),
+             },
+-            TuiEvent::Draw | TuiEvent::Resize => {
+-                tui.draw(u16::MAX, |frame| {
++            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                tui.draw_with_size(u16::MAX, screen_size, |frame| {
+                     self.render(frame.area(), frame.buffer);
+                 })?;
+                 Ok(())
+@@ -889,7 +900,12 @@ impl StaticOverlay {
+ }
+ 
+ impl StaticOverlay {
+-    pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
++    pub(crate) fn handle_event(
++        &mut self,
++        tui: &mut tui::Tui,
++        event: TuiEvent,
++        screen_size: Size,
++    ) -> Result<()> {
+         match event {
+             TuiEvent::Key(key_event) => match key_event {
+                 e if self.view.keymap.close.is_pressed(e) => {
+@@ -898,8 +914,8 @@ impl StaticOverlay {
+                 }
+                 other => self.view.handle_key_event(tui, other),
+             },
+-            TuiEvent::Draw | TuiEvent::Resize => {
+-                tui.draw(u16::MAX, |frame| {
++            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                tui.draw_with_size(u16::MAX, screen_size, |frame| {
+                     self.render(frame.area(), frame.buffer);
+                 })?;
+                 Ok(())
+diff --git a/codex-rs/tui/src/resume_picker.rs b/codex-rs/tui/src/resume_picker.rs
+index 0ccdeb590dd9..54eb563abd92 100644
+--- a/codex-rs/tui/src/resume_picker.rs
++++ b/codex-rs/tui/src/resume_picker.rs
+@@ -50,6 +50,7 @@ use crossterm::event::KeyModifiers;
+ use ratatui::layout::Constraint;
+ use ratatui::layout::Layout;
+ use ratatui::layout::Rect;
++use ratatui::layout::Size;
+ use ratatui::style::Color;
+ use ratatui::style::Style;
+ use ratatui::style::Styled as _;
+@@ -462,8 +463,13 @@ async fn run_session_picker_with_loader(
+     loop {
+         tokio::select! {
+             Some(ev) = tui_events.next() => {
++                let screen_size = alt.tui.screen_size_for_event(&ev)?;
+                 if state.overlay.is_some() {
+-                    state.handle_overlay_event(alt.tui, ev)?;
++                    state.handle_overlay_event(
++                        alt.tui,
++                        ev,
++                        screen_size,
++                    )?;
+                     continue;
+                 }
+                 match ev {
+@@ -478,14 +484,17 @@ async fn run_session_picker_with_loader(
+                     TuiEvent::Paste(pasted) => {
+                         state.handle_paste(pasted);
+                     }
+-                    TuiEvent::Draw | TuiEvent::Resize => {
+-                        if let Ok(size) = alt.tui.terminal.size() {
+-                            let list_height =
+-                                size.height.saturating_sub(PICKER_CHROME_HEIGHT) as usize;
+-                            state.update_viewport(list_height, list_viewport_width(size.width));
+-                            state.ensure_minimum_rows_for_view(list_height);
+-                        }
+-                        draw_picker(alt.tui, &state)?;
++                    TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                        let list_height = screen_size
++                            .height
++                            .saturating_sub(PICKER_CHROME_HEIGHT)
++                            as usize;
++                        state.update_viewport(
++                            list_height,
++                            list_viewport_width(screen_size.width),
++                        );
++                        state.ensure_minimum_rows_for_view(list_height);
++                        draw_picker(alt.tui, &state, screen_size)?;
+                         if state.note_transcript_loading_frame_drawn() {
+                             state.open_pending_transcript_if_ready();
+                         }
+@@ -1017,11 +1026,16 @@ impl PickerState {
+         self.request_frame();
+     }
+ 
+-    fn handle_overlay_event(&mut self, tui: &mut Tui, event: TuiEvent) -> Result<()> {
++    fn handle_overlay_event(
++        &mut self,
++        tui: &mut Tui,
++        event: TuiEvent,
++        screen_size: Size,
++    ) -> Result<()> {
+         let Some(overlay) = &mut self.overlay else {
+             return Ok(());
+         };
+-        overlay.handle_event(tui, event)?;
++        overlay.handle_event(tui, event, screen_size)?;
+         if overlay.is_done() {
+             self.overlay = None;
+             self.request_frame();
+@@ -1871,10 +1885,9 @@ fn parse_timestamp_str(ts: &str) -> Option<DateTime<Utc>> {
+         .ok()
+ }
+ 
+-fn draw_picker(tui: &mut Tui, state: &PickerState) -> std::io::Result<()> {
++fn draw_picker(tui: &mut Tui, state: &PickerState, screen_size: Size) -> std::io::Result<()> {
+     // Render full-screen overlay
+-    let height = tui.terminal.size()?.height;
+-    tui.draw(height, |frame| {
++    tui.draw_with_size(screen_size.height, screen_size, |frame| {
+         let area = frame.area();
+         let [header, _header_gap, search, _search_gap, list, footer] = Layout::vertical([
+             Constraint::Length(1),
+diff --git a/codex-rs/tui/src/startup_hooks_review.rs b/codex-rs/tui/src/startup_hooks_review.rs
+index da12cd9288da..3837e8d2ef86 100644
+--- a/codex-rs/tui/src/startup_hooks_review.rs
++++ b/codex-rs/tui/src/startup_hooks_review.rs
+@@ -2,6 +2,7 @@ use color_eyre::eyre::Result;
+ use crossterm::event::KeyEventKind;
+ use ratatui::buffer::Buffer;
+ use ratatui::layout::Rect;
++use ratatui::layout::Size;
+ use ratatui::style::Stylize;
+ use ratatui::text::Line;
+ use ratatui::widgets::Clear;
+@@ -98,7 +99,8 @@ async fn run_startup_hooks_review_app(
+         app_event_tx.clone(),
+         &keymap,
+     );
+-    draw_view(tui, &view)?;
++    let mut screen_size = tui.terminal.size()?;
++    draw_view(tui, &view, screen_size)?;
+ 
+     let tui_events = tui.event_stream();
+     tokio::pin!(tui_events);
+@@ -107,13 +109,14 @@ async fn run_startup_hooks_review_app(
+         let Some(event) = tui_events.next().await else {
+             return Ok(StartupHooksReviewOutcome::Continue);
+         };
++        screen_size = tui.screen_size_for_event(&event)?;
+         match event {
+             TuiEvent::Key(key_event) => {
+                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                     view.handle_key_event(key_event);
+                 }
+                 let Some(selection) = selected_choice(&mut view) else {
+-                    draw_view(tui, &view)?;
++                    draw_view(tui, &view, screen_size)?;
+                     continue;
+                 };
+                 match selection {
+@@ -131,7 +134,7 @@ async fn run_startup_hooks_review_app(
+                             app_event_tx.clone(),
+                             &keymap,
+                         );
+-                        draw_view(tui, &view)?;
++                        draw_view(tui, &view, screen_size)?;
+                         let result = write_hook_trusts(
+                             app_server.request_handle(),
+                             entry
+@@ -160,14 +163,16 @@ async fn run_startup_hooks_review_app(
+                                     app_event_tx.clone(),
+                                     &keymap,
+                                 );
+-                                draw_view(tui, &view)?;
++                                draw_view(tui, &view, screen_size)?;
+                             }
+                         }
+                     }
+                 }
+             }
+             TuiEvent::Paste(_) => {}
+-            TuiEvent::Draw | TuiEvent::Resize => draw_view(tui, &view)?,
++            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                draw_view(tui, &view, screen_size)?
++            }
+         }
+     }
+ }
+@@ -255,8 +260,8 @@ fn selection_item(name: &str, is_disabled: bool) -> SelectionItem {
+     }
+ }
+ 
+-fn draw_view(tui: &mut Tui, view: &ListSelectionView) -> Result<()> {
+-    tui.draw(u16::MAX, |frame| {
++fn draw_view(tui: &mut Tui, view: &ListSelectionView, screen_size: Size) -> Result<()> {
++    tui.draw_with_size(u16::MAX, screen_size, |frame| {
+         let area = frame.area();
+         frame.render_widget_ref(Clear, area);
+         let view_area = Rect::new(
+diff --git a/codex-rs/tui/src/transcript_reflow.rs b/codex-rs/tui/src/transcript_reflow.rs
+index d95d99c944b3..a4247714ada8 100644
+--- a/codex-rs/tui/src/transcript_reflow.rs
++++ b/codex-rs/tui/src/transcript_reflow.rs
+@@ -29,6 +29,7 @@ pub(crate) struct TranscriptReflowState {
+     last_reflow_width: Option<u16>,
+     pending_reflow_width: Option<u16>,
+     pending_until: Option<Instant>,
++    size_recheck_at: Option<Instant>,
+     ran_during_stream: bool,
+     resize_requested_during_stream: bool,
+ }
+@@ -115,6 +116,23 @@ impl TranscriptReflowState {
+         self.pending_reflow_width = None;
+     }
+ 
++    /// Request one backend size sample after the completed reflow repaint has had time to settle.
++    pub(crate) fn schedule_size_recheck(&mut self) {
++        self.size_recheck_at = Some(Instant::now() + TRANSCRIPT_REFLOW_DEBOUNCE);
++    }
++
++    /// Report whether a backend size sample is due without dropping an early request.
++    pub(crate) fn poll_size_recheck(&mut self, now: Instant) -> SizeRecheck {
++        let Some(deadline) = self.size_recheck_at else {
++            return SizeRecheck::NotPending;
++        };
++        if now < deadline {
++            return SizeRecheck::Pending(deadline - now);
++        }
++        self.size_recheck_at = None;
++        SizeRecheck::Due
++    }
++
+     /// Remember the terminal width that actually rebuilt transcript scrollback.
+     ///
+     /// Resize scheduling is driven by observed widths, but debounced redraws may run before a
+@@ -174,6 +192,13 @@ pub(crate) struct TranscriptWidthChange {
+     pub(crate) initialized: bool,
+ }
+ 
++#[derive(Debug, Eq, PartialEq)]
++pub(crate) enum SizeRecheck {
++    NotPending,
++    Pending(Duration),
++    Due,
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -289,6 +314,20 @@ mod tests {
+         assert!(!state.take_stream_finish_reflow_needed());
+     }
+ 
++    #[test]
++    fn size_recheck_remains_pending_until_deadline() {
++        let mut state = TranscriptReflowState::default();
++        state.schedule_size_recheck();
++        let deadline = state.size_recheck_at.expect("size recheck deadline");
++
++        assert_eq!(
++            state.poll_size_recheck(deadline - Duration::from_millis(1)),
++            SizeRecheck::Pending(Duration::from_millis(1))
++        );
++        assert_eq!(state.poll_size_recheck(deadline), SizeRecheck::Due);
++        assert_eq!(state.poll_size_recheck(deadline), SizeRecheck::NotPending);
++    }
++
+     #[test]
+     fn clear_resets_stream_reflow_flags() {
+         let mut state = TranscriptReflowState::default();
+diff --git a/codex-rs/tui/src/tui.rs b/codex-rs/tui/src/tui.rs
+index 33509874fac0..6406ce8e3c80 100644
+--- a/codex-rs/tui/src/tui.rs
++++ b/codex-rs/tui/src/tui.rs
+@@ -34,6 +34,7 @@ use ratatui::crossterm::terminal::enable_raw_mode;
+ use ratatui::layout::Offset;
+ use ratatui::layout::Position;
+ use ratatui::layout::Rect;
++use ratatui::layout::Size;
+ use ratatui::text::Line;
+ use tokio::sync::broadcast;
+ use tokio_stream::Stream;
+@@ -99,15 +100,19 @@ impl Drop for Tui {
+ 
+ #[cfg(test)]
+ mod tests {
++    use std::cell::Cell;
+     use std::io::Write as _;
+ 
++    use super::TuiEvent;
+     use super::clear_for_viewport_change;
++    use super::resolve_event_screen_size;
+     use super::should_emit_notification;
+     use crate::custom_terminal::Terminal as CustomTerminal;
+     use crate::test_backend::VT100Backend;
+     use codex_config::types::NotificationCondition;
+     use ratatui::layout::Position;
+     use ratatui::layout::Rect;
++    use ratatui::layout::Size;
+     use ratatui::text::Line;
+ 
+     #[test]
+@@ -195,6 +200,35 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn draw_size_policy_refreshes_only_after_resume() {
++        let cached = Size::new(/*width*/ 80, /*height*/ 24);
++        let resized = Size::new(/*width*/ 100, /*height*/ 30);
++        let resumed = Size::new(/*width*/ 120, /*height*/ 40);
++        let refresh_calls = Cell::new(0);
++        let refresh = || {
++            refresh_calls.set(refresh_calls.get() + 1);
++            Ok(resumed)
++        };
++
++        assert_eq!(
++            resolve_event_screen_size(&TuiEvent::Draw, cached, refresh).expect("resolve draw"),
++            cached
++        );
++        assert_eq!(refresh_calls.get(), 0);
++        assert_eq!(
++            resolve_event_screen_size(&TuiEvent::Resize(resized), cached, refresh)
++                .expect("resolve resize"),
++            resized
++        );
++        assert_eq!(refresh_calls.get(), 0);
++        assert_eq!(
++            resolve_event_screen_size(&TuiEvent::Resume, cached, refresh).expect("resolve resume"),
++            resumed
++        );
++        assert_eq!(refresh_calls.get(), 1);
++    }
++
+     #[tokio::test(flavor = "current_thread", start_paused = true)]
+     async fn inserting_history_lines_schedules_a_draw() {
+         let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+@@ -547,13 +581,30 @@ pub enum TuiEvent {
+     Key(KeyEvent),
+     /// A bracketed paste payload normalized by the app layer before it reaches the composer.
+     Paste(String),
+-    /// A terminal size notification that should be handled as resize-sensitive draw work.
++    /// A terminal size notification and its reported dimensions.
+     ///
+     /// Resize is separate from `Draw` so the app can run feature-gated pre-render logic without
+     /// changing the default draw path for scheduled frames.
+-    Resize,
++    Resize(Size),
+     /// A scheduled repaint that does not necessarily correspond to a terminal size change.
+     Draw,
++    /// The first repaint after returning from process suspension.
++    ///
++    /// The app refreshes terminal geometry for this draw because resize events are not delivered
++    /// while the process is suspended.
++    Resume,
++}
++
++fn resolve_event_screen_size(
++    event: &TuiEvent,
++    last_known_screen_size: Size,
++    refresh_screen_size: impl FnOnce() -> Result<Size>,
++) -> Result<Size> {
++    match event {
++        TuiEvent::Resize(size) => Ok(*size),
++        TuiEvent::Resume => refresh_screen_size(),
++        TuiEvent::Draw | TuiEvent::Key(_) | TuiEvent::Paste(_) => Ok(last_known_screen_size),
++    }
+ }
+ 
+ pub struct Tui {
+@@ -635,6 +686,17 @@ impl Tui {
+         }
+     }
+ 
++    /// Resolve the geometry associated with an event.
++    ///
++    /// Resize events carry their dimensions, resume performs one backend refresh because resize
++    /// notifications are not delivered while the process is suspended, and other events reuse the
++    /// size last applied by the terminal.
++    pub(crate) fn screen_size_for_event(&self, event: &TuiEvent) -> Result<Size> {
++        resolve_event_screen_size(event, self.terminal.last_known_screen_size, || {
++            self.terminal.size()
++        })
++    }
++
+     /// Set whether alternate screen is enabled. When false, enter_alt_screen() becomes a no-op.
+     pub fn set_alt_screen_enabled(&mut self, enabled: bool) {
+         self.alt_screen_enabled = enabled;
+@@ -847,29 +909,29 @@ impl Tui {
+     fn update_inline_viewport_for_resize_reflow(
+         terminal: &mut Terminal,
+         height: u16,
++        screen_size: Size,
+     ) -> Result<bool> {
+-        let size = terminal.size()?;
+-        let terminal_height_shrank = size.height < terminal.last_known_screen_size.height;
+-        let terminal_height_grew = size.height > terminal.last_known_screen_size.height;
++        let terminal_height_shrank = screen_size.height < terminal.last_known_screen_size.height;
++        let terminal_height_grew = screen_size.height > terminal.last_known_screen_size.height;
+         let viewport_was_bottom_aligned =
+             terminal.viewport_area.bottom() == terminal.last_known_screen_size.height;
+         let previous_area = terminal.viewport_area;
+ 
+         let mut area = terminal.viewport_area;
+-        area.height = height.min(size.height);
+-        area.width = size.width;
++        area.height = height.min(screen_size.height);
++        area.width = screen_size.width;
+         let mut needs_full_repaint = false;
+ 
+-        if area.bottom() > size.height {
+-            let scroll_by = area.bottom() - size.height;
++        if area.bottom() > screen_size.height {
++            let scroll_by = area.bottom() - screen_size.height;
+             if !terminal_height_shrank {
+                 terminal
+                     .backend_mut()
+                     .scroll_region_up(0..area.top(), scroll_by)?;
+             }
+-            area.y = size.height - area.height;
++            area.y = screen_size.height - area.height;
+         } else if terminal_height_grew && viewport_was_bottom_aligned {
+-            area.y = size.height - area.height;
++            area.y = screen_size.height - area.height;
+         }
+ 
+         if area != terminal.viewport_area {
+@@ -913,6 +975,16 @@ impl Tui {
+         &mut self,
+         height: u16,
+         draw_fn: impl FnOnce(&mut custom_terminal::Frame),
++    ) -> Result<()> {
++        let screen_size = self.terminal.size()?;
++        self.draw_with_size(height, screen_size, draw_fn)
++    }
++
++    pub fn draw_with_size(
++        &mut self,
++        height: u16,
++        screen_size: Size,
++        draw_fn: impl FnOnce(&mut custom_terminal::Frame),
+     ) -> Result<()> {
+         // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
+         // in the synchronized update.
+@@ -923,7 +995,7 @@ impl Tui {
+ 
+         // Precompute any viewport updates that need a cursor-position query before entering
+         // the synchronized update, to avoid racing with the event reader.
+-        let mut pending_viewport_area = self.pending_viewport_area()?;
++        let mut pending_viewport_area = self.pending_viewport_area(screen_size)?;
+ 
+         ensure_virtual_terminal_processing()?;
+ 
+@@ -939,17 +1011,15 @@ impl Tui {
+                 terminal.clear()?;
+             }
+ 
+-            let size = terminal.size()?;
+-
+             let mut area = terminal.viewport_area;
+-            area.height = height.min(size.height);
+-            area.width = size.width;
++            area.height = height.min(screen_size.height);
++            area.width = screen_size.width;
+             // If the viewport has expanded, scroll everything else up to make room.
+-            if area.bottom() > size.height {
++            if area.bottom() > screen_size.height {
+                 terminal
+                     .backend_mut()
+-                    .scroll_region_up(0..area.top(), area.bottom() - size.height)?;
+-                area.y = size.height - area.height;
++                    .scroll_region_up(0..area.top(), area.bottom() - screen_size.height)?;
++                area.y = screen_size.height - area.height;
+             }
+             if area != terminal.viewport_area {
+                 // On startup, the old viewport can still be empty. Clear from the
+@@ -978,7 +1048,7 @@ impl Tui {
+                 self.suspend_context.set_cursor_y(inline_area_bottom);
+             }
+ 
+-            terminal.draw(|frame| {
++            terminal.draw_with_size(screen_size, |frame| {
+                 draw_fn(frame);
+             })
+         })?
+@@ -1048,6 +1118,7 @@ impl Tui {
+     pub fn draw_with_resize_reflow(
+         &mut self,
+         height: u16,
++        screen_size: Size,
+         draw_fn: impl FnOnce(&mut custom_terminal::Frame),
+     ) -> Result<()> {
+         // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
+@@ -1067,7 +1138,7 @@ impl Tui {
+ 
+             let terminal = &mut self.terminal;
+             let needs_full_repaint =
+-                Self::update_inline_viewport_for_resize_reflow(terminal, height)?;
++                Self::update_inline_viewport_for_resize_reflow(terminal, height, screen_size)?;
+             Self::flush_pending_history_lines(
+                 terminal,
+                 &mut self.pending_history_lines,
+@@ -1092,15 +1163,14 @@ impl Tui {
+                 self.suspend_context.set_cursor_y(inline_area_bottom);
+             }
+ 
+-            terminal.draw(|frame| {
++            terminal.draw_with_size(screen_size, |frame| {
+                 draw_fn(frame);
+             })
+         })?
+     }
+ 
+-    fn pending_viewport_area(&mut self) -> Result<Option<Rect>> {
++    fn pending_viewport_area(&mut self, screen_size: Size) -> Result<Option<Rect>> {
+         let terminal = &mut self.terminal;
+-        let screen_size = terminal.size()?;
+         let last_known_screen_size = terminal.last_known_screen_size;
+         if screen_size != last_known_screen_size
+             && let Ok(cursor_pos) = terminal.get_cursor_position()
+diff --git a/codex-rs/tui/src/tui/event_stream.rs b/codex-rs/tui/src/tui/event_stream.rs
+index da719463f338..da972c87e74a 100644
+--- a/codex-rs/tui/src/tui/event_stream.rs
++++ b/codex-rs/tui/src/tui/event_stream.rs
+@@ -263,11 +263,13 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
+                             "failed to suspend TUI process"
+                         );
+                     }
+-                    return Some(TuiEvent::Draw);
++                    return Some(TuiEvent::Resume);
+                 }
+                 Some(TuiEvent::Key(key_event))
+             }
+-            Event::Resize(_, _) => Some(TuiEvent::Resize),
++            Event::Resize(width, height) => {
++                Some(TuiEvent::Resize(ratatui::layout::Size { width, height }))
++            }
+             Event::Paste(pasted) => Some(TuiEvent::Paste(pasted)),
+             Event::FocusGained => {
+                 self.terminal_focused.store(true, Ordering::Relaxed);
+@@ -513,7 +515,13 @@ mod tests {
+         handle.send(Ok(Event::Resize(80, 24)));
+ 
+         let next = stream.next().await;
+-        assert!(matches!(next, Some(TuiEvent::Resize)));
++        assert!(matches!(
++            next,
++            Some(TuiEvent::Resize(ratatui::layout::Size {
++                width: 80,
++                height: 24
++            }))
++        ));
+     }
+ 
+     #[tokio::test(flavor = "current_thread")]
+diff --git a/codex-rs/tui/src/update_prompt.rs b/codex-rs/tui/src/update_prompt.rs
+index 28360a5b73d3..fcbe4304b2e8 100644
+--- a/codex-rs/tui/src/update_prompt.rs
++++ b/codex-rs/tui/src/update_prompt.rs
+@@ -55,11 +55,12 @@ pub(crate) async fn run_update_prompt_if_needed(
+ 
+     while !screen.is_done() {
+         if let Some(event) = events.next().await {
++            let screen_size = tui.screen_size_for_event(&event)?;
+             match event {
+                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
+                 TuiEvent::Paste(_) => {}
+-                TuiEvent::Draw | TuiEvent::Resize => {
+-                    tui.draw(u16::MAX, |frame| {
++                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
++                    tui.draw_with_size(u16::MAX, screen_size, |frame| {
+                         frame.render_widget_ref(&screen, frame.area());
+                     })?;
+                 }
